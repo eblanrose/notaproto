@@ -1,4 +1,3 @@
-
 #ifndef NAP_H
 #define NAP_H
 
@@ -6,6 +5,10 @@
 #include <stddef.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#if defined(__MUSL__)
+#include <time.h>
+#include <sys/types.h>
+#endif
 
 #define NAP_MAGIC        0x6E617000
 #define NAP_HEADER_SIZE  12

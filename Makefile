@@ -1,5 +1,5 @@
 CC       = cc
-CFLAGS   = -Wall -O2 -fPIC
+CFLAGS   = -Wall -O2 -fPIC -D_GNU_SOURCE
 AR       = ar
 ARFLAGS  = rcs
 
@@ -19,6 +19,12 @@ LIB_OBJ  = $(LIB_SRC:.c=.o)
 
 INCLUDES = -I. -I$(NAPC_DIR)
 
+ifdef DEBUG
+    CFLAGS := -Wall -g -fPIC -D_GNU_SOURCE
+else
+    CFLAGS += -flto -fdata-sections -ffunction-sections
+endif
+
 .PHONY: all clean
 
 all: libnotaproto.a
@@ -27,7 +33,7 @@ libnotaproto.a: $(LIB_OBJ)
 	$(AR) $(ARFLAGS) $@ $^
 
 libnotaproto.so: $(LIB_OBJ)
-	$(CC) -shared -o $@ $^
+	$(CC) -shared -o $@ $^ $(LDFLAGS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
