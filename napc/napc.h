@@ -99,17 +99,30 @@ typedef struct {
     uint16_t offset;
 } NapcFragPiece;
 
+
+typedef struct NapcCtx NapcCtx;
+
+typedef void (*napc_recv_cb)(NapcCtx *ctx, const uint8_t *data, size_t len,
+                              struct sockaddr_in *src, uint32_t ident);
+
+typedef void (*napc_post_drain_cb)(NapcCtx *ctx);
+
 typedef struct {
     uint32_t ident;
     uint16_t total_rdos;
     int      have_terminal;
+    struct sockaddr_in src;
     NapcFragPiece *pieces;
     size_t   num_pieces;
     size_t   cap_pieces;
     time_t   start_time;
 } NapcReassembly;
 
-typedef struct {
+struct NapcCtx {
+    void    *user_data;
+    napc_recv_cb recv_cb;
+    napc_post_drain_cb post_drain;
+
     int      socket_fd;
     int      epoll_fd;
     
@@ -120,6 +133,12 @@ typedef struct {
     NapcReassembly *reass;
     size_t   max_reass;
     time_t   reass_timeout;
+    size_t   reass_hint;
+
+    uint8_t *tx_scratch;
+    size_t   tx_scratch_cap;
+    uint8_t *rx_scratch;
+    size_t   rx_scratch_cap;
     
     int      use_apc;
     int      use_time;
@@ -130,11 +149,9 @@ typedef struct {
     uint64_t bytes_recv;
     uint32_t frags_sent;
     uint32_t frags_recv;
-} NapcCtx;
+};
 
 
-typedef void (*napc_recv_cb)(NapcCtx *ctx, const uint8_t *data, size_t len,
-                              struct sockaddr_in *src, uint32_t ident);
 
 
 int  napc_init(NapcCtx *ctx, uint16_t port);
@@ -145,6 +162,8 @@ int  napc_send_with_opts(NapcCtx *ctx, const uint8_t *data, size_t len,
                          struct sockaddr_in *dst, int use_apc, int use_time,
                          uint32_t tsval, uint32_t tsecr);
 void napc_set_recv_cb(NapcCtx *ctx, napc_recv_cb cb);
+
+size_t napc_single_max(const NapcCtx *ctx);
 
 
 uint32_t napc_ocs_compute(const uint8_t *surplus, size_t surplus_len);

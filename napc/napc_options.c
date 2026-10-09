@@ -7,11 +7,12 @@ int surplus_add_tlv(uint8_t *surplus, size_t *offset, size_t maxlen,
                     uint8_t kind, uint8_t length, const uint8_t *value) {
     size_t pos = *offset;
     size_t opt_total = 2 + length;
-    
+
+    if (opt_total > 254) return -1;
     if (pos + opt_total > maxlen) return -1;
-    
+
     surplus[pos++] = kind;
-    surplus[pos++] = length;
+    surplus[pos++] = (uint8_t)opt_total;
     if (value && length > 0) {
         memcpy(surplus + pos, value, length);
         pos += length;
@@ -29,35 +30,37 @@ void surplus_add_eol(uint8_t *surplus, size_t *offset, size_t maxlen) {
 int parse_options(const uint8_t *surplus, size_t surplus_len,
                   opt_callback cb, void *user) {
     size_t offset = 0;
-    
+
     while (offset < surplus_len) {
         uint8_t kind = surplus[offset];
-        
+
         if (kind == NAPC_OPT_EOL) break;
         if (kind == NAPC_OPT_NOP) { offset++; continue; }
         if (offset + 2 > surplus_len) return -1;
-        
+
         uint8_t len = surplus[offset + 1];
+        size_t hdr_len = 2;
         size_t opt_len;
-        
+
         if (len == 255) {
             if (offset + 4 > surplus_len) return -1;
-            opt_len = (surplus[offset + 2] << 8) | surplus[offset + 3];
-            offset += 4;
+            opt_len = ((size_t)surplus[offset + 2] << 8) | surplus[offset + 3];
+            hdr_len = 4;
+            if (opt_len < hdr_len) return -1;
         } else {
             opt_len = len;
-            offset += 2;
+            if (opt_len < hdr_len) return -1;
         }
-        
-        if (offset + opt_len - 2 > surplus_len) return -1;
-        
-        size_t value_len = (len == 255) ? opt_len - 4 : opt_len - 2;
-        uint8_t *value = (uint8_t*)(surplus + offset);
-        
-        if (cb(kind, value, value_len, user) < 0) return -1;
-        offset += value_len;
+
+        if (offset + opt_len > surplus_len) return -1;
+
+        size_t value_len = opt_len - hdr_len;
+        const uint8_t *value = surplus + offset + hdr_len;
+
+        if (cb(kind, (uint8_t*)value, value_len, user) < 0) return -1;
+        offset += opt_len;
     }
-    
+
     return 0;
 }
 

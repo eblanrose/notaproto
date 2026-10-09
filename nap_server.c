@@ -1,6 +1,7 @@
 
 #include "nap.h"
 #include "napc.h"
+#include "nap_rel.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,11 +22,13 @@ typedef struct {
 
 static NAPServerInternal *g_srv = NULL;
 
-static void srv_send(NAPServerInternal *srv, NAPSession *sess, 
+#define NAP_SESSION_IDLE_TIMEOUT 1800
+
+static int srv_send(NAPServerInternal *srv, NAPSession *sess, 
                      uint8_t type, const uint8_t *data, size_t len) {
-    size_t total = sizeof(NAPHeader) + len;
+    if (len > 65535 - sizeof(NAPHeader)) return -1;
+
     uint8_t packet[65535];
-    
     NAPHeader *hdr = (NAPHeader*)packet;
     memset(hdr, 0, sizeof(*hdr));
     hdr->magic = htonl(NAP_MAGIC);
@@ -34,11 +37,46 @@ static void srv_send(NAPServerInternal *srv, NAPSession *sess,
     hdr->msg_type = type;
     
     if (data && len) memcpy(packet + sizeof(NAPHeader), data, len);
-    
-    
-    ssize_t sent = sendto(srv->napc.socket_fd, packet, total, 0,
-                         (struct sockaddr*)&sess->client_addr, sizeof(sess->client_addr));
-    (void)sent;
+
+    return napc_send(&srv->napc, packet, sizeof(NAPHeader) + len,
+                     &sess->client_addr) < 0 ? -1 : 0;
+}
+
+static int srv_raw_tx(void *user, const uint8_t *packet, size_t len) {
+    NAPSession *sess = user;
+    return napc_send(&g_srv->napc, packet, len,
+                     &sess->client_addr) < 0 ? -1 : 0;
+}
+
+static NapRel* srv_rel_new(void) {
+    if (!g_srv) return NULL;
+    return nap_rel_create(napc_single_max(&g_srv->napc) - sizeof(NAPHeader));
+}
+
+static void srv_reliable_deliver(void *user, uint8_t type,
+                                 const uint8_t *data, size_t len) {
+    NAPSession *sess = user;
+    if (type == NAP_MSG_DATA && g_srv->on_data && len > 0)
+        g_srv->on_data(sess->session_id, 0, data, len);
+}
+
+static void srv_send_cum(NAPSession *sess) {
+    if (!sess->rel) return;
+    uint16_t cum = sess->rel->rx_expected;
+    uint8_t ack[2] = { (uint8_t)(cum >> 8), (uint8_t)(cum & 0xFF) };
+    srv_send(g_srv, sess, NAP_MSG_CUM, ack, sizeof(ack));
+}
+
+static void srv_post_drain(NapcCtx *ctx) {
+    (void)ctx;
+    if (!g_srv) return;
+    for (size_t i = 0; i < g_srv->max_sessions; i++) {
+        NAPSession *s = &g_srv->sessions[i];
+        if (s->state == NAP_SESSION_ACTIVE && s->rel && s->cum_dirty) {
+            s->cum_dirty = 0;
+            srv_send_cum(s);
+        }
+    }
 }
 
 static void napc_callback(NapcCtx *ctx, const uint8_t *data, size_t len,
@@ -63,8 +101,18 @@ static void napc_callback(NapcCtx *ctx, const uint8_t *data, size_t len,
     switch (hdr->msg_type) {
     case NAP_MSG_CONNECT:
         for (size_t i = 0; i < g_srv->max_sessions; i++) {
+            NAPSession *s = &g_srv->sessions[i];
+            if (s->state != NAP_SESSION_CLOSED && s->session_id == sid) {
+                s->client_addr = *src;
+                s->last_activity = time(NULL);
+                srv_send(g_srv, s, NAP_MSG_CONNECT_OK, NULL, 0);
+                return;
+            }
+        }
+        for (size_t i = 0; i < g_srv->max_sessions; i++) {
             if (g_srv->sessions[i].state == NAP_SESSION_CLOSED) {
                 sess = &g_srv->sessions[i];
+                nap_rel_destroy(sess->rel);
                 memset(sess, 0, sizeof(NAPSession));
                 sess->session_id = sid;
                 sess->state = NAP_SESSION_ACTIVE;
@@ -101,14 +149,17 @@ static void napc_callback(NapcCtx *ctx, const uint8_t *data, size_t len,
         }
         break;
     
-    case NAP_MSG_DATA:
-        if (sess && g_srv->on_data && len > sizeof(NAPHeader)) {
-            g_srv->on_data(sid, 0, data + sizeof(NAPHeader), len - sizeof(NAPHeader));
+    case NAP_MSG_CUM:
+        if (sess && sess->rel && len >= sizeof(NAPHeader) + 2) {
+            const uint8_t *p = data + sizeof(NAPHeader);
+            nap_rel_on_ack(sess->rel, (uint16_t)(((uint16_t)p[0] << 8) | p[1]));
         }
         break;
     
     case NAP_MSG_CLOSE:
         if (sess) {
+            nap_rel_destroy(sess->rel);
+            sess->rel = NULL;
             sess->state = NAP_SESSION_CLOSED;
             if (g_srv->on_disconnect) g_srv->on_disconnect(sid);
         }
@@ -116,6 +167,19 @@ static void napc_callback(NapcCtx *ctx, const uint8_t *data, size_t len,
     
     case NAP_MSG_PING:
         if (sess) srv_send(g_srv, sess, NAP_MSG_PONG, NULL, 0);
+        break;
+    
+    default:
+        if (sess && !nap_rel_is_control(hdr->msg_type)) {
+            if (!sess->rel) sess->rel = srv_rel_new();
+            if (sess->rel) {
+                nap_rel_recv(sess->rel, ntohs(hdr->seq_num), hdr->msg_type,
+                             data + sizeof(NAPHeader),
+                             len - sizeof(NAPHeader),
+                             srv_reliable_deliver, sess);
+                sess->cum_dirty = 1;
+            }
+        }
         break;
     }
     
@@ -142,6 +206,7 @@ int nap_server_init(NAPServer *srv, uint16_t port, size_t max_sessions) {
     }
     
     napc_set_recv_cb(&isrv->napc, napc_callback);
+    isrv->napc.post_drain = srv_post_drain;
     
     isrv->on_connect = srv->on_connect;
     isrv->on_auth = srv->on_auth;
@@ -155,22 +220,61 @@ int nap_server_init(NAPServer *srv, uint16_t port, size_t max_sessions) {
     return 0;
 }
 
+int nap_server_set_mds(NAPServer *srv, uint16_t mds) {
+    (void)srv;
+    if (!g_srv || mds < 64) return -1;
+    g_srv->napc.local_mds = mds;
+    return 0;
+}
+
 int nap_server_poll(NAPServer *srv, int timeout_ms) {
     (void)srv;
     if (!g_srv) return -1;
-    return napc_poll(&g_srv->napc, timeout_ms);
+
+    int unacked = 0;
+    for (size_t i = 0; i < g_srv->max_sessions; i++) {
+        NAPSession *s = &g_srv->sessions[i];
+        if (s->state == NAP_SESSION_ACTIVE && s->rel)
+            unacked += nap_rel_tick(s->rel, srv_raw_tx, s);
+    }
+    int poll_ms = timeout_ms;
+    if (unacked > 0 && (poll_ms < 0 || poll_ms > 50)) poll_ms = 50;
+
+    int rc = napc_poll(&g_srv->napc, poll_ms);
+
+    time_t now = time(NULL);
+    for (size_t i = 0; i < g_srv->max_sessions; i++) {
+        NAPSession *s = &g_srv->sessions[i];
+        if (s->state == NAP_SESSION_ACTIVE &&
+            now - s->last_activity > NAP_SESSION_IDLE_TIMEOUT) {
+            nap_rel_destroy(s->rel);
+            s->rel = NULL;
+            s->state = NAP_SESSION_CLOSED;
+            if (g_srv->on_disconnect) g_srv->on_disconnect(s->session_id);
+        }
+    }
+
+    return rc;
 }
 
 int nap_server_send(NAPServer *srv, uint32_t sid, uint8_t type,
                     const uint8_t *data, size_t len) {
     (void)srv;
     if (!g_srv) return -1;
-    
+
     for (size_t i = 0; i < g_srv->max_sessions; i++) {
         if (g_srv->sessions[i].session_id == sid &&
             g_srv->sessions[i].state == NAP_SESSION_ACTIVE) {
-            srv_send(g_srv, &g_srv->sessions[i], type, data, len);
-            return 0;
+            NAPSession *s = &g_srv->sessions[i];
+
+            if (nap_rel_is_control(type))
+                return srv_send(g_srv, s, type, data, len);
+
+            if (len > NAP_REL_MAX_MSG) return -1;
+            if (!s->rel) s->rel = srv_rel_new();
+            if (!s->rel) return -1;
+            return nap_rel_send(s->rel, srv_raw_tx, s, s->session_id,
+                                type, data, len);
         }
     }
     return -1;
@@ -183,6 +287,8 @@ int nap_server_close_session(NAPServer *srv, uint32_t sid) {
 void nap_server_cleanup(NAPServer *srv) {
     (void)srv;
     if (!g_srv) return;
+    for (size_t i = 0; i < g_srv->max_sessions; i++)
+        nap_rel_destroy(g_srv->sessions[i].rel);
     napc_close(&g_srv->napc);
     free(g_srv->sessions);
     free(g_srv);

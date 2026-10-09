@@ -12,9 +12,9 @@ int napc_init(NapcCtx *ctx, uint16_t port) {
     ctx->local_mds = 1472;
     ctx->local_mrds = 65535;
     ctx->local_segs = 64;
-    ctx->max_reass = 32;
-    ctx->reass_timeout = 120;
-    ctx->use_apc = 0;
+    ctx->max_reass = 512;
+    ctx->reass_timeout = 5;
+    ctx->use_apc = 1;
     ctx->use_time = 0;
     
     ctx->reass = calloc(ctx->max_reass, sizeof(NapcReassembly));
@@ -25,6 +25,10 @@ int napc_init(NapcCtx *ctx, uint16_t port) {
         free(ctx->reass);
         return -1;
     }
+    
+    int buf_size = 4 * 1024 * 1024;
+    setsockopt(ctx->socket_fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+    setsockopt(ctx->socket_fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
     
     if (port > 0) {
         struct sockaddr_in addr = {
@@ -52,6 +56,8 @@ int napc_init(NapcCtx *ctx, uint16_t port) {
 void napc_close(NapcCtx *ctx) {
     if (ctx->socket_fd >= 0) close(ctx->socket_fd);
     if (ctx->epoll_fd >= 0) close(ctx->epoll_fd);
+    free(ctx->tx_scratch);
+    free(ctx->rx_scratch);
     
     for (size_t i = 0; i < ctx->max_reass; i++) {
         for (size_t j = 0; j < ctx->reass[i].num_pieces; j++)

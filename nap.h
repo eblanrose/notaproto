@@ -26,6 +26,7 @@ typedef enum {
     NAP_MSG_CLOSE      = 0x09,
     NAP_MSG_PING       = 0x0A,
     NAP_MSG_PONG       = 0x0B,
+    NAP_MSG_CUM        = 0x0C,
 } NAPMessageType;
 
 typedef enum {
@@ -57,15 +58,23 @@ typedef enum {
     NAP_SESSION_CLOSING
 } NAPSessionState;
 
+struct NapcCtx;
+struct NapRel;
+
 typedef struct {
     uint32_t session_id;
     NAPSessionState state;
     struct sockaddr_in server_addr;
     int fd;
     uint16_t next_seq;
+    uint16_t mds;
     time_t last_activity;
     uint32_t bytes_sent;
     uint32_t bytes_recv;
+    struct NapcCtx *napc;
+    void *recv_queue;
+    struct NapRel *rel;
+    uint8_t cum_dirty;
 } NAPClient;
 
 typedef struct {
@@ -79,6 +88,8 @@ typedef struct {
     uint32_t bytes_sent;
     uint32_t bytes_recv;
     void *user_data;
+    struct NapRel *rel;
+    uint8_t cum_dirty;
 } NAPSession;
 
 typedef struct {
@@ -92,6 +103,10 @@ typedef struct {
 } NAPServer;
 
 int nap_server_init(NAPServer *srv, uint16_t port, size_t max_sessions);
+
+int nap_server_set_mds(NAPServer *srv, uint16_t mds);
+int nap_client_set_mds(NAPClient *cli, uint16_t mds);
+
 int nap_server_poll(NAPServer *srv, int timeout_ms);
 int nap_server_send(NAPServer *srv, uint32_t session_id, uint8_t msg_type,
                     const uint8_t *data, size_t len);
@@ -103,6 +118,11 @@ int nap_client_connect(NAPClient *cli, const char *host, uint16_t port);
 int nap_client_auth(NAPClient *cli, const char *username, const char *password);
 int nap_client_send_data(NAPClient *cli, const uint8_t *data, size_t len);
 int nap_client_recv(NAPClient *cli, uint8_t *type, uint8_t **data, size_t *len);
+
+int nap_client_wait_acked(NAPClient *cli, int timeout_ms);
+
+int nap_client_wait_space(NAPClient *cli, size_t len, int timeout_ms);
+
 int nap_client_close(NAPClient *cli);
 
 #endif

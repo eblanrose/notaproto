@@ -12,7 +12,8 @@ NAPC_SRC = $(NAPC_DIR)/napc_utils.c \
            $(NAPC_DIR)/napc_init.c
 
 NAP_SRC  = nap_client.c \
-           nap_server.c
+           nap_server.c \
+           nap_rel.c
 
 LIB_SRC  = $(NAPC_SRC) $(NAP_SRC)
 LIB_OBJ  = $(LIB_SRC:.c=.o)
@@ -24,6 +25,9 @@ ifdef DEBUG
 else
     CFLAGS += -flto -fdata-sections -ffunction-sections
 endif
+
+CFLAGS += -MMD -MP
+DEP     = $(LIB_OBJ:.o=.d)
 
 .PHONY: all clean
 
@@ -39,4 +43,6 @@ libnotaproto.so: $(LIB_OBJ)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 clean:
-	rm -f *.o $(NAPC_DIR)/*.o *.a *.so
+	rm -f *.o $(NAPC_DIR)/*.o *.a *.so $(DEP)
+
+-include $(DEP)
